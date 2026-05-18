@@ -44,6 +44,8 @@ mediafusion.local*
 .scrapy
 .lock
 .git
+backend/target/
+**/node_modules/
 kodi/
 !kodi/*.py
 !deployment/startup.sh
