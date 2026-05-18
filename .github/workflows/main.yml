@@ -149,6 +149,9 @@ jobs:
   mediafusion_docker_build:
     needs: [update_version, rust-build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -188,6 +191,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and push image
         id: docker_build
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
@@ -204,6 +214,8 @@ jobs:
           tags: |
             mhdzumair/mediafusion:${{ github.ref_name }}
             mhdzumair/mediafusion:${{ contains(github.ref_name, 'beta') && 'beta' || 'latest' }}
+            ghcr.io/${{ github.repository_owner }}/mediafusion:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/mediafusion:${{ contains(github.ref_name, 'beta') && 'beta' || 'latest' }}
 
       - name: Image digest
         run: echo "${{ steps.docker_build.outputs.digest }}"
