@@ -42,7 +42,10 @@ use axum::{
     Router,
 };
 use tower_http::{
-    compression::CompressionLayer, cors::CorsLayer, services::ServeDir, timeout::TimeoutLayer,
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    timeout::TimeoutLayer,
 };
 
 use crate::api_error_middleware::api_error_middleware;
@@ -694,8 +697,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
+    let frontend_dir = std::path::PathBuf::from("clients/frontend/dist");
+    let spa_fallback = ServeDir::new(&frontend_dir)
+        .not_found_service(ServeFile::new(frontend_dir.join("index.html")));
+
     Router::new()
         .merge(api_router)
+        .nest_service("/app", spa_fallback)
         .nest_service("/static", ServeDir::new(resources_dir))
         .layer(CorsLayer::permissive())
 }
