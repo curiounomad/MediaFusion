@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod admin_database;
 pub mod admin_extended;
+pub mod admin_keyword_filters;
 pub mod admin_metrics;
 pub mod admin_scrapers;
 pub mod auth;
@@ -38,11 +39,17 @@ pub mod watchlist;
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::{
-    compression::CompressionLayer, cors::CorsLayer, services::ServeDir, timeout::TimeoutLayer,
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    timeout::TimeoutLayer,
 };
 
 use crate::api_error_middleware::api_error_middleware;
@@ -51,6 +58,34 @@ use crate::make_trace_layer;
 use crate::metrics_middleware::metrics_middleware;
 use crate::state::AppState;
 use crate::stremio_auth_middleware::stremio_auth_middleware;
+
+async fn root_redirect() -> impl IntoResponse {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/app")
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Sets `Cache-Control: no-cache` on HTML responses so browsers always revalidate
+/// `index.html` after a deploy. Hashed asset files are left alone (immutable by
+/// default via their content-addressed filenames).
+async fn spa_cache_headers(response: Response) -> Response {
+    let mut response = response;
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false);
+    if is_html {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        );
+    }
+    response
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     let resources_dir = state.config.resources_dir.clone();
@@ -456,6 +491,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/admin/contribution-settings", get(admin_extended::get_contribution_settings).put(admin_extended::update_contribution_settings))
         .route("/api/v1/admin/contribution-levels", get(admin_extended::get_contribution_levels))
         .route("/api/v1/admin/contribution-settings/reset", post(admin_extended::reset_contribution_settings))
+        // ── Admin keyword filters ─────────────────────────────────────────────
+        .route("/api/v1/admin/keyword-filters", get(admin_keyword_filters::list_keyword_filters).post(admin_keyword_filters::add_keyword_filter))
+        .route("/api/v1/admin/keyword-filters/reload", post(admin_keyword_filters::reload_keyword_cache))
+        .route("/api/v1/admin/keyword-filters/{id}", patch(admin_keyword_filters::toggle_keyword_filter).delete(admin_keyword_filters::delete_keyword_filter))
+        .route("/api/v1/admin/keyword-whitelist", get(admin_keyword_filters::list_keyword_whitelist).post(admin_keyword_filters::add_whitelist_phrase))
+        .route("/api/v1/admin/keyword-whitelist/{id}", delete(admin_keyword_filters::delete_whitelist_phrase))
         .route("/api/v1/admin/exceptions/status", get(admin_extended::get_exception_status))
         .route("/api/v1/admin/exceptions", get(admin_extended::list_exceptions).delete(admin_extended::clear_all_exceptions))
         .route("/api/v1/admin/exceptions/{fingerprint}", get(admin_extended::get_exception).delete(admin_extended::clear_single_exception))
@@ -692,10 +733,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         ))
         .layer(make_trace_layer!())
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
+
+    let frontend_dist_dir = state.config.frontend_dist_dir.clone();
+    let index_html = std::path::Path::new(&frontend_dist_dir)
+        .join("index.html")
+        .to_string_lossy()
+        .into_owned();
+
+    // ServeDir serves real files (assets, etc.) directly; unmatched paths fall
+    // back to index.html so React Router handles client-side navigation.
+    let spa_service = ServeDir::new(&frontend_dist_dir).fallback(ServeFile::new(&index_html));
 
     Router::new()
+        .route("/", get(root_redirect))
         .merge(api_router)
+        .nest_service("/app", spa_service)
         .nest_service("/static", ServeDir::new(resources_dir))
+        .layer(axum::middleware::map_response(spa_cache_headers))
         .layer(CorsLayer::permissive())
 }

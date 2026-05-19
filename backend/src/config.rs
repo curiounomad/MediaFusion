@@ -249,13 +249,20 @@ pub struct AppConfig {
     /// Root of the resources/ tree served at /static (mirrors Python's StaticFiles mount).
     /// Defaults to resources/ (relative to working directory, correct for Docker WORKDIR=/mediafusion).
     pub resources_dir: String,
+    /// Path to the built React SPA dist/ directory served at /app.
+    /// Defaults to clients/frontend/dist (matches Docker COPY destination).
+    pub frontend_dist_dir: String,
 
     // ── Request timeouts ──────────────────────────────────────────
     /// Timeout for /stream/ routes in seconds. Live search scrapes run inline so
     /// this needs to be longer than the slowest scraper. Default: 120.
     pub request_timeout: u64,
 
-    // ── Public indexers (Byparr / site filter) ────────────────────
+    // ── Browser automation (Browserless v2 + Byparr) ─────────────
+    /// Browserless v2 base URL (e.g. `http://browserless:3000`).
+    /// Used by spiders that need real Chrome execution to bypass JS bot challenges
+    /// (e.g. adm.tools on sport-video.org.ua).
+    pub browserless_url: Option<String>,
     /// Byparr (FlareSolverr-compatible) base URL. When set, Cloudflare-protected
     /// public indexers (1337x, TPB, etc.) are fetched via Byparr instead of plain HTTP.
     pub byparr_url: Option<String>,
@@ -638,6 +645,8 @@ impl AppConfig {
             exception_tracking_max_entries: env("EXCEPTION_TRACKING_MAX_ENTRIES")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(500),
             resources_dir: env("RESOURCES_DIR").unwrap_or_else(|_| "resources".into()),
+            frontend_dist_dir: env("FRONTEND_DIST_DIR")
+                .unwrap_or_else(|_| "clients/frontend/dist".into()),
             request_timeout: env("REQUEST_TIMEOUT")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(120),
             prowlarr_search_query_timeout: env("PROWLARR_SEARCH_QUERY_TIMEOUT")
@@ -654,6 +663,9 @@ impl AppConfig {
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(15),
             stream_raw_redis_cache_ttl: env("STREAM_RAW_REDIS_CACHE_TTL_SECONDS")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(900),
+            browserless_url: env("BROWSERLESS_URL").ok()
+                .filter(|s| !s.is_empty())
+                .map(|u| u.trim_end_matches('/').to_string()),
             byparr_url: env("BYPARR_URL").ok()
                 .filter(|s| !s.is_empty())
                 .map(|u| u.trim_end_matches('/').to_string()),

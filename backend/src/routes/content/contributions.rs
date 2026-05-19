@@ -205,7 +205,7 @@ async fn fetch_contrib_row(pool: &sqlx::PgPool, id: &str) -> Option<ContribRow> 
         Option<DateTime<Utc>>,
     );
     let row = sqlx::query_as::<_, RowTuple>(
-        r#"SELECT id, user_id, contribution_type, target_id, data, status,
+        r#"SELECT id, user_id, contribution_type, target_id, data::jsonb, status::text,
                       reviewed_by, reviewed_at, review_notes,
                       admin_review_requested, admin_review_requested_by,
                       admin_review_requested_at, admin_review_reason,
@@ -316,7 +316,7 @@ pub async fn list_contributions(
 
     let mut count_sql = String::from("SELECT COUNT(*) FROM contributions WHERE 1=1");
     let mut fetch_sql = String::from(
-        r#"SELECT id, user_id, contribution_type, target_id, data, status,
+        r#"SELECT id, user_id, contribution_type, target_id, data::jsonb, status::text,
                   reviewed_by, reviewed_at, review_notes,
                   admin_review_requested, admin_review_requested_by,
                   admin_review_requested_at, admin_review_reason,
@@ -651,7 +651,7 @@ pub async fn list_pending_contributions(
 
     let mut count_sql = String::from("SELECT COUNT(*) FROM contributions WHERE status = 'PENDING'");
     let mut fetch_sql = String::from(
-        r#"SELECT id, user_id, contribution_type, target_id, data, status,
+        r#"SELECT id, user_id, contribution_type, target_id, data::jsonb, status::text,
                   reviewed_by, reviewed_at, review_notes,
                   admin_review_requested, admin_review_requested_by,
                   admin_review_requested_at, admin_review_reason,
@@ -1266,6 +1266,48 @@ pub async fn reject_approved_contribution(
     Json(contrib_row_to_json(&state.pool, &updated).await).into_response()
 }
 
+fn is_adult_contribution(
+    data: &serde_json::Value,
+    cache: &crate::state::KeywordFilterCache,
+) -> bool {
+    let check_text = |text: &str| -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let lower = text.to_lowercase();
+        // whitelist check first
+        if cache.whitelist.iter().any(|p| lower.contains(p.as_str())) {
+            return false;
+        }
+        // keyword check
+        cache.keywords.iter().any(|kw| lower.contains(kw.as_str()))
+    };
+
+    // Check top-level name and title fields (torrent_name, display name, resolved title)
+    for key in &["name", "title"] {
+        if let Some(text) = data.get(key).and_then(|v| v.as_str()) {
+            if check_text(text) {
+                return true;
+            }
+        }
+    }
+
+    // Check per-file fields inside file_data
+    if let Some(files) = data.get("file_data").and_then(|v| v.as_array()) {
+        for file in files {
+            for key in &["filename", "meta_title", "episode_title", "title"] {
+                if let Some(text) = file.get(key).and_then(|v| v.as_str()) {
+                    if check_text(text) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// POST /api/v1/contributions/review/bulk  (moderator)
 pub async fn bulk_review_contributions(
     headers: HeaderMap,
@@ -1306,27 +1348,51 @@ pub async fn bulk_review_contributions(
         }
     };
 
-    let mut fetch_sql = String::from("SELECT id FROM contributions WHERE status = 'PENDING'");
-
-    if let Some(ref ct) = body.contribution_type {
-        let esc = ct.replace('\'', "''");
-        fetch_sql.push_str(&format!(" AND contribution_type = '{esc}'"));
-    }
-
-    fetch_sql.push_str(" ORDER BY created_at ASC");
-
-    let ids: Vec<(String,)> = sqlx::query_as(&fetch_sql)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+    let (fetch_sql, rows): (String, Vec<(String, serde_json::Value)>) = if let Some(ref ct) =
+        body.contribution_type
+    {
+        let sql = String::from(
+                "SELECT id, data::jsonb FROM contributions WHERE status = 'PENDING' AND contribution_type = $1 ORDER BY created_at ASC",
+            );
+        let r = sqlx::query_as::<_, (String, serde_json::Value)>(&sql)
+            .bind(ct)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
+        (sql, r)
+    } else {
+        let sql = String::from(
+                "SELECT id, data::jsonb FROM contributions WHERE status = 'PENDING' ORDER BY created_at ASC",
+            );
+        let r = sqlx::query_as::<_, (String, serde_json::Value)>(&sql)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
+        (sql, r)
+    };
+    let _ = fetch_sql;
 
     let mut approved = 0i64;
     let mut rejected = 0i64;
     let mut skipped = 0i64;
 
-    for (id,) in ids {
+    for (id, data) in rows {
         if let Some(ref allowed_ids) = body.contribution_ids {
             if !allowed_ids.contains(&id) {
+                skipped += 1;
+                continue;
+            }
+        }
+
+        // When approving, skip adult content
+        if new_status == "APPROVED" {
+            let cache = state
+                .keyword_filters
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let is_adult = is_adult_contribution(&data, &cache);
+            drop(cache);
+            if is_adult {
                 skipped += 1;
                 continue;
             }
@@ -1344,7 +1410,7 @@ pub async fn bulk_review_contributions(
 
         match result {
             Ok(r) if r.rows_affected() > 0 => {
-                if new_status == "approved" {
+                if new_status == "APPROVED" {
                     approved += 1;
                 } else {
                     rejected += 1;
